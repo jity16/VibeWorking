@@ -37,4 +37,6 @@ On launch, rows with `running` execution are marked `unknown` until the adapter 
 
 ## Implementation boundary for v1
 
-Codex hosted runs use the app-server Unix socket and can be attached by `codex --remote`. Claude hosted runs use tmux and hooks. External sessions are discovery-only unless all identity evidence matches. iTerm2 is a future adapter; Terminal.app support is best-effort and never used as a generic focus/input target.
+Codex hosted runs use the app-server Unix socket and can be attached by `codex --remote`. Claude hosted runs use tmux and hooks. iTerm2 is a future adapter; Terminal.app support is best-effort and never used as a generic focus/input target.
+
+**Not implemented:** discovery of externally started sessions. `agent_sessions` rows are written only by `begin_run`, so the Agents list shows runs this app launched and nothing else. A Codex or Claude Code session you started yourself in a terminal is invisible to the app. Adding it means enumerating candidates (tmux panes, `~/.codex/sessions`, live processes), proving identity before claiming any of them, and deciding what a session with no owning Task looks like in the UI — none of that exists yet.

@@ -25,7 +25,9 @@ The app stores data under `~/Library/Application Support/Vibe Working/`. API key
 
 ## Scope and known limits
 
-Codex uses the official app-server protocol when the installed CLI supports it. Claude Code uses a managed tmux session and hooks, and receives the task prompt as process argv. External sessions are observable only when identity evidence can be verified. iTerm2 is not available on the development machine, so the first adapter targets Terminal.app/tmux and reports an unbound terminal rather than guessing.
+Codex uses the official app-server protocol when the installed CLI supports it. Claude Code uses a managed tmux session and hooks, and receives the task prompt as process argv. iTerm2 is not available on the development machine, so the first adapter targets Terminal.app/tmux and reports an unbound terminal rather than guessing.
+
+The Agents list shows runs started from this app and nothing else. Discovery of Codex or Claude Code sessions you started yourself in a terminal is **not implemented** — see [architecture](docs/architecture.md).
 
 Automatic continuation after a capacity failure is Codex-only: it is sent over the app-server RPC channel, where delivery is confirmed. There is deliberately no `tmux send-keys` path, because typing into a pane cannot be confirmed to have reached the agent. Live model calls, a real overload retry, and an approval round trip are still untested — they need network credentials.
 

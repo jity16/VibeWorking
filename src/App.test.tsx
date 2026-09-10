@@ -85,4 +85,22 @@ describe('a project with no tasks', () => {
     expect(container.querySelector('.pane-heading')!.contains(create[0]), 'the create action belongs in the heading, where it stays put').toBe(true)
     expect(container.querySelector('.empty-state')!.textContent).toContain('新建任务')
   })
+
+  it('opens the new-task form in the list, not inside the heading', async () => {
+    invoke.mockImplementation((name: string) =>
+      name === 'bootstrap'
+        ? Promise.resolve({ projects: [project], tasks: [], sessions: [], settings: emptySettings })
+        : Promise.reject(new Error(`unexpected command ${name}`)),
+    )
+
+    await act(async () => { root.render(<App />) })
+    await flush()
+    const open = [...container.querySelectorAll<HTMLButtonElement>('.pane-heading button')].find(button => button.textContent?.includes('新建任务'))!
+    await act(async () => { open.click() })
+
+    const form = container.querySelector('.new-task-form')
+    expect(form, 'the form should render once opened').not.toBeNull()
+    expect(container.querySelector('.pane-heading')!.contains(form!), 'the form belongs where the new row will land').toBe(false)
+    expect(container.querySelector('.list-pane')!.contains(form!)).toBe(true)
+  })
 })

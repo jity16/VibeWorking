@@ -34,8 +34,17 @@ function App() {
 }
 
 function TaskView({projects,tasks,activeTask,selectedProject,query,onSelect,onSelectProject,onCreated,onChanged}:{projects:Project[];tasks:Task[];activeTask:Task|null;selectedProject:string;query:string;onSelect:(id:string)=>void;onSelectProject:(id:string)=>void;onCreated:(task:Task)=>void;onChanged:()=>void}) {
+  const [creating,setCreating] = useState(false)
   const grouped = selectedProject==='all'; const groups = grouped ? projects.map(project=>({project,tasks:tasks.filter(task=>task.project_id===project.id)})).filter(group=>group.tasks.length) : [{project:projects.find(p=>p.id===selectedProject),tasks}]
-  return <div className="content-grid"><section className="list-pane"><div className="pane-heading"><div><p className="eyebrow">{selectedProject==='all'?'工作区':'项目'}</p><h1>{selectedProject==='all'?'全部任务':projects.find(p=>p.id===selectedProject)?.name??'任务'}</h1></div><CreateTask projects={projects} projectId={selectedProject==='all'?(projects[0]?.id??''):selectedProject} onCreated={onCreated}/></div>{!projects.length?<EmptyState text="先创建一个项目" action={<CreateProject onCreated={project=>{onSelectProject(project.id);onChanged()}}/>}/>:!tasks.length?<EmptyState text={query?`没有匹配「${query}」的任务`:'还没有任务，用右上角的「新建任务」开始'}/>:<div className="task-groups">{groups.map(group=>group.project&&<TaskGroup key={group.project.id} project={group.project} tasks={group.tasks} grouped={grouped} activeId={activeTask?.id} onSelect={onSelect} onChanged={onChanged}/>)}</div>}</section><TaskInspector task={activeTask} projects={projects} onChanged={onChanged}/></div>
+  const targetProject = selectedProject==='all'?(projects[0]?.id??''):selectedProject
+  // The form opens where the new row will land, not up in the heading beside
+  // the button that opened it.
+  const body = creating
+    ? <NewTaskForm projects={projects} projectId={targetProject} onCreated={task=>{setCreating(false);onCreated(task)}} onCancel={()=>setCreating(false)}/>
+    : !projects.length ? <EmptyState text="先创建一个项目" action={<CreateProject onCreated={project=>{onSelectProject(project.id);onChanged()}}/>}/>
+    : !tasks.length ? <EmptyState text={query?`没有匹配「${query}」的任务`:'还没有任务，用右上角的「新建任务」开始'}/>
+    : null
+  return <div className="content-grid"><section className="list-pane"><div className="pane-heading"><div><p className="eyebrow">{selectedProject==='all'?'工作区':'项目'}</p><h1>{selectedProject==='all'?'全部任务':projects.find(p=>p.id===selectedProject)?.name??'任务'}</h1></div>{!!projects.length&&!creating&&<button className="button primary" onClick={()=>setCreating(true)}><Plus size={15}/>新建任务</button>}</div>{body}{!!tasks.length&&<div className="task-groups">{groups.map(group=>group.project&&<TaskGroup key={group.project.id} project={group.project} tasks={group.tasks} grouped={grouped} activeId={activeTask?.id} onSelect={onSelect} onChanged={onChanged}/>)}</div>}</section><TaskInspector task={activeTask} projects={projects} onChanged={onChanged}/></div>
 }
 
 function TaskGroup({project,tasks,grouped,activeId,onSelect,onChanged}:{project:Project;tasks:Task[];grouped:boolean;activeId?:string;onSelect:(id:string)=>void;onChanged:()=>void}) { const [open,setOpen]=useState(true); return <div className="task-group">{grouped&&<button className="group-heading" onClick={()=>setOpen(!open)}>{open?<ChevronDown size={15}/>:<ChevronRight size={15}/>}<span>{project.name}</span><span className="group-count">{tasks.length}</span></button>}{open&&tasks.map(task=><TaskRow key={task.id} task={task} active={task.id===activeId} onClick={()=>onSelect(task.id)} onChanged={onChanged}/>)}</div> }
@@ -52,7 +61,7 @@ function TaskInspector({task,projects,onChanged}:{task:Task|null;projects:Projec
 }
 
 
-function AgentView({projects,tasks,sessions,onChanged}:{projects:Project[];tasks:Task[];sessions:AgentSession[];onChanged:()=>void}) { return <section className="agents-page"><div className="pane-heading"><div><p className="eyebrow">执行记录</p><h1>Agents</h1></div></div>{!sessions.length?<EmptyState text="还没有执行中的 Agent" action={null}/>:<div className="agent-list">{sessions.map(session=><AgentRow key={session.id} session={session} task={tasks.find(t=>t.id===session.task_id)} project={projects.find(p=>p.id===session.project_id)} onChanged={onChanged}/>)}</div>}</section> }
+function AgentView({projects,tasks,sessions,onChanged}:{projects:Project[];tasks:Task[];sessions:AgentSession[];onChanged:()=>void}) { return <section className="agents-page"><div className="pane-heading"><div><p className="eyebrow">执行记录</p><h1>Agents</h1></div></div>{!sessions.length?<EmptyState text="还没有从这里发起过执行。这里只显示本应用启动的 Codex / Claude Code 会话，不会发现你在终端里自己开的会话。"/>:<div className="agent-list">{sessions.map(session=><AgentRow key={session.id} session={session} task={tasks.find(t=>t.id===session.task_id)} project={projects.find(p=>p.id===session.project_id)} onChanged={onChanged}/>)}</div>}</section> }
 function AgentRow({session,task,project,onChanged}:{session:AgentSession;task?:Task;project?:Project;onChanged:()=>void}) {
   const needsAttention = session.attention !== 'none'
   return <div className={`agent-row ${needsAttention?'needs-attention':''}`}>
@@ -67,5 +76,14 @@ function SettingsView({settings,onSaved,onRestored}:{settings:ProxySettings;onSa
 
 function EmptyState({text,action}:{text:string;action?:React.ReactNode}) { return <div className="empty-state"><p>{text}</p>{action}</div> }
 function CreateProject({onCreated}:{onCreated:(project:Project)=>void}) { const [open,setOpen]=useState(false);const [name,setName]=useState('');const [path,setPath]=useState('');if(!open)return <button className="small-add" title="新建项目" onClick={()=>setOpen(true)}><Plus size={15}/></button>;return <form className="inline-form" onSubmit={e=>{e.preventDefault();command<Project>('create_project',{input:{name,root_path:path}}).then(project=>{onCreated(project);setOpen(false);setName('');setPath('')}).catch(error=>alert(error))}}><input autoFocus value={name} onChange={e=>setName(e.target.value)} placeholder="项目名称"/><input value={path} onChange={e=>setPath(e.target.value)} placeholder="本地路径"/><button className="small-add" type="submit"><Check size={15}/></button><button className="small-add" type="button" onClick={()=>setOpen(false)}><X size={15}/></button></form> }
-function CreateTask({projects,projectId,onCreated}:{projects:Project[];projectId:string;onCreated:(task:Task)=>void}) { const [open,setOpen]=useState(false);const [title,setTitle]=useState('');const [request,setRequest]=useState('');if(!projects.length)return null;if(!open)return <button className="button primary" onClick={()=>setOpen(true)}><Plus size={15}/>新建任务</button>;return <form className="new-task-form" onSubmit={e=>{e.preventDefault();command<Task>('create_task',{input:{project_id:projectId||projects[0].id,title,original_request:request}}).then(task=>{onCreated(task);setOpen(false);setTitle('');setRequest('')}).catch(error=>alert(error))}}><input autoFocus value={title} onChange={e=>setTitle(e.target.value)} placeholder="任务标题"/><textarea value={request} onChange={e=>setRequest(e.target.value)} placeholder="描述要完成的事情"/><div><button className="button secondary" type="button" onClick={()=>setOpen(false)}>取消</button><button className="button primary" type="submit">创建任务</button></div></form> }
+function NewTaskForm({projects,projectId,onCreated,onCancel}:{projects:Project[];projectId:string;onCreated:(task:Task)=>void;onCancel:()=>void}) {
+  const [title,setTitle]=useState(''); const [request,setRequest]=useState(''); const [error,setError]=useState('')
+  const project=projects.find(item=>item.id===projectId)??projects[0]
+  return <form className="new-task-form" onKeyDown={event=>{if(event.key==='Escape')onCancel()}} onSubmit={event=>{event.preventDefault();setError('');command<Task>('create_task',{input:{project_id:project.id,title,original_request:request}}).then(onCreated).catch(e=>setError(String(e)))}}>
+    <input autoFocus value={title} onChange={e=>setTitle(e.target.value)} placeholder="任务标题"/>
+    <textarea value={request} onChange={e=>setRequest(e.target.value)} placeholder="描述要完成的事情"/>
+    <div className="new-task-footer"><span className="new-task-target">建到「{project.name}」</span><button className="button secondary" type="button" onClick={onCancel}>取消</button><button className="button primary" type="submit">创建任务</button></div>
+    {error&&<p className="form-error">{error}</p>}
+  </form>
+}
 export default App
