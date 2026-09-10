@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, Check, ChevronDown, ChevronRight, CircleAlert, Copy, MoreHorizontal, Pause, Play, Plus, RefreshCw, Search, Settings, Square, Terminal, X } from 'lucide-react'
+import { Bot, Check, ChevronDown, ChevronRight, CircleAlert, Copy, MoreHorizontal, Play, Plus, RefreshCw, Search, Settings, Terminal, X } from 'lucide-react'
 import { agentEvents, command } from './lib/bridge'
-import { attentionLabel, executionLabel, statusLabel } from './lib/labels'
-import type { AgentSession, Bootstrap, DiscoveredSession, DiscoveryReport, Project, ProxySettings, Task } from './types/domain'
+import { executionLabel, statusLabel } from './lib/labels'
+import type { Bootstrap, LiveReport, LiveSession, Project, ProxySettings, Task } from './types/domain'
 
 type View = 'tasks'|'agents'|'settings'
 const emptyBootstrap:Bootstrap = {projects:[],tasks:[],sessions:[],settings:{base_url:'',protocol:'responses',model:'',timeout_seconds:90,api_key_ref:null,has_api_key:false}}
@@ -24,10 +24,10 @@ function App() {
       <div className="sidebar-bottom"><button className={view==='settings'?'nav-button active':'nav-button'} onClick={()=>setView('settings')}><Settings size={16}/>设置</button><div className="storage-note"><span className="live-dot"/>本地数据库</div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="view-tabs"><button className={view==='tasks'?'tab active':'tab'} onClick={()=>setView('tasks')}>TODO</button><button className={view==='agents'?'tab active':'tab'} onClick={()=>setView('agents')}>Agents{data.sessions.filter(s=>s.attention!=='none').length>0&&<span className="attention-count">{data.sessions.filter(s=>s.attention!=='none').length}</span>}</button></div><div className="top-actions"><label className="search"><Search size={15}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索任务"/></label><button className="icon-button" title="刷新" onClick={refresh}><RefreshCw size={16}/></button></div></header>
+      <header className="topbar"><div className="view-tabs"><button className={view==='tasks'?'tab active':'tab'} onClick={()=>setView('tasks')}>TODO</button><button className={view==='agents'?'tab active':'tab'} onClick={()=>setView('agents')}>Agents</button></div><div className="top-actions"><label className="search"><Search size={15}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索任务"/></label><button className="icon-button" title="刷新" onClick={refresh}><RefreshCw size={16}/></button></div></header>
       {error&&<div className="error-bar"><CircleAlert size={16}/><span>{error}</span><button onClick={()=>setError('')}><X size={15}/></button></div>}
       {view==='tasks'&&<TaskView projects={data.projects} tasks={visibleTasks} activeTask={activeTask} selectedProject={projectId} query={query} onSelect={setSelectedTask} onSelectProject={setProjectId} onCreated={task=>{setSelectedTask(task.id);refresh()}} onChanged={refresh}/>}
-      {view==='agents'&&<AgentView projects={data.projects} tasks={data.tasks} sessions={data.sessions} onChanged={refresh}/>} 
+      {view==='agents'&&<AgentView projects={data.projects} selectedProject={projectId}/>}
       {view==='settings'&&<SettingsView settings={data.settings} onSaved={settings=>setData(old=>({...old,settings}))} onRestored={refresh}/>}
     </main>
   </div>
@@ -61,69 +61,58 @@ function TaskInspector({task,projects,onChanged}:{task:Task|null;projects:Projec
 }
 
 
-function AgentView({projects,tasks,sessions,onChanged}:{projects:Project[];tasks:Task[];sessions:AgentSession[];onChanged:()=>void}) {
-  return <section className="agents-page">
-    <div className="pane-heading"><div><p className="eyebrow">执行记录</p><h1>Agents</h1></div></div>
-    <h3 className="section-title">本应用发起的执行</h3>
-    {!sessions.length
-      ? <EmptyState text="还没有从这里发起过执行。只有这一节里的会话是本应用启动并持续跟踪的。"/>
-      : <div className="agent-list">{sessions.map(session=><AgentRow key={session.id} session={session} task={tasks.find(t=>t.id===session.task_id)} project={projects.find(p=>p.id===session.project_id)} onChanged={onChanged}/>)}</div>}
-    <DiscoveredSessions/>
-  </section>
-}
-
-/** Scanning spawns a codex app-server and reads transcripts off disk, so it runs
- *  when this tab is opened rather than on every bootstrap. */
-function DiscoveredSessions() {
-  const [report,setReport] = useState<DiscoveryReport|null>(null); const [loading,setLoading] = useState(true); const [error,setError] = useState('')
-  const scan = () => {setLoading(true);setError('');command<DiscoveryReport>('discovered_sessions').then(setReport).catch(e=>setError(String(e))).finally(()=>setLoading(false))}
+function AgentView({projects,selectedProject}:{projects:Project[];selectedProject:string}) {
+  const [report,setReport] = useState<LiveReport|null>(null); const [loading,setLoading] = useState(true); const [error,setError] = useState('')
+  const scan = () => {setLoading(true);setError('');command<LiveReport>('live_sessions').then(setReport).catch(e=>setError(String(e))).finally(()=>setLoading(false))}
   useEffect(scan,[])
+  const project = projects.find(item=>item.id===selectedProject)
+  const all = report?.sessions ?? []
+  // A project scopes the view to the sessions running inside its folder.
+  const visible = selectedProject==='all' ? all : all.filter(session=>session.project_id===selectedProject)
   const groups = useMemo(() => {
-    const byProject = new Map<string,{name:string;sessions:DiscoveredSession[]}>()
-    for(const session of report?.sessions??[]) {
+    if(selectedProject!=='all') return []
+    const byProject = new Map<string,{name:string;sessions:LiveSession[]}>()
+    for(const session of visible) {
       const key = session.project_id ?? ''
       if(!byProject.has(key)) byProject.set(key,{name:session.project_name??'未分类',sessions:[]})
       byProject.get(key)!.sessions.push(session)
     }
-    // Named projects first; 未分类 is a leftover pile, not a peer.
-    return [...byProject.entries()].sort((left,right)=>(left[0]?0:1)-(right[0]?0:1)||right[1].sessions.length-left[1].sessions.length)
-  },[report])
-  return <div className="discovered">
-    <div className="section-heading"><h3 className="section-title">机器上已有的会话</h3><button className="text-button" onClick={scan} disabled={loading}>{loading?'扫描中…':'重新扫描'}</button></div>
-    <p className="muted">从 Codex app-server 和 ~/.claude/projects 读取，按工作目录归到项目下。只读——本应用没有启动它们，无法确认是否还在运行，也不能停止或接管。</p>
+    return [...byProject.entries()].sort((left,right)=>(left[0]?0:1)-(right[0]?0:1))
+  },[visible,selectedProject])
+  return <section className="agents-page">
+    <div className="pane-heading">
+      <div><p className="eyebrow">{selectedProject==='all'?'所有项目':'项目'}</p><h1>{project?.name??'运行中的 Agent'}</h1></div>
+      <button className="button secondary" onClick={scan} disabled={loading}><RefreshCw size={14}/>{loading?'扫描中…':'重新扫描'}</button>
+    </div>
+    <p className="muted">tmux 里正在运行的 Codex / Claude Code，按工作目录归到项目下。会话关掉后就不再出现。</p>
     {error&&<p className="form-error">{error}</p>}
     {report?.warnings.map(warning=><p key={warning} className="form-error">{warning}</p>)}
     {loading&&!report&&<p className="muted">正在扫描…</p>}
-    {report&&!report.sessions.length&&!loading&&<p className="muted">没有找到会话。</p>}
-    {/* 未分类 is collapsed only when there are project groups it would bury.
-        When it is all there is, collapsing it would show the user nothing. */}
-    {groups.map(([id,group])=><DiscoveredGroup key={id||'unassigned'} name={group.name} sessions={group.sessions} defaultOpen={!!id||groups.length===1}/>)}
-    {report?.truncated&&<p className="muted">Codex 会话很多，这里只列出最近的部分。</p>}
+    {report&&!visible.length&&!loading&&<EmptyState text={selectedProject==='all'?'tmux 里没有正在运行的 Agent。':`「${project?.name??'这个项目'}」的目录下没有正在运行的 Agent。`}/>}
+    {selectedProject==='all'
+      ? groups.map(([id,group])=><LiveGroup key={id||'unassigned'} name={group.name} sessions={group.sessions}/>)
+      : <div className="agent-list">{visible.map(session=><LiveRow key={session.pane} session={session}/>)}</div>}
+  </section>
+}
+
+function LiveGroup({name,sessions}:{name:string;sessions:LiveSession[]}) {
+  const [open,setOpen] = useState(true)
+  return <div className="task-group">
+    <button className="group-heading" onClick={()=>setOpen(!open)}>{open?<ChevronDown size={15}/>:<ChevronRight size={15}/>}<span>{name}</span><span className="group-count">{sessions.length}</span></button>
+    {open&&<div className="agent-list">{sessions.map(session=><LiveRow key={session.pane} session={session}/>)}</div>}
   </div>
 }
 
-function DiscoveredGroup({name,sessions,defaultOpen}:{name:string;sessions:DiscoveredSession[];defaultOpen:boolean}) {
-  const [open,setOpen] = useState(defaultOpen)
-  return <div className="task-group">
-    <button className="group-heading" onClick={()=>setOpen(!open)}>{open?<ChevronDown size={15}/>:<ChevronRight size={15}/>}<span>{name}</span><span className="group-count">{sessions.length}</span></button>
-    {open&&<div className="agent-list">{sessions.map(session=><div key={`${session.provider}-${session.session_id}`} className="agent-row discovered-row">
-      <div className={`agent-icon ${session.provider}`}><Bot size={17}/></div>
-      <div className="agent-main">
-        <div className="agent-title"><strong>{session.title||'（无标题）'}</strong><span className="execution">{session.provider==='codex'?'Codex':'Claude Code'}</span></div>
-        <span className="agent-task mono">{session.cwd}</span>
-        <span className="agent-activity">{session.updated_at?new Date(session.updated_at).toLocaleString():'时间未知'}</span>
-      </div>
-      <button className="text-button" title="复制会话 ID" onClick={()=>navigator.clipboard?.writeText(session.session_id)}><Copy size={13}/>ID</button>
-    </div>)}</div>}
-  </div>
-}
-function AgentRow({session,task,project,onChanged}:{session:AgentSession;task?:Task;project?:Project;onChanged:()=>void}) {
-  const needsAttention = session.attention !== 'none'
-  return <div className={`agent-row ${needsAttention?'needs-attention':''}`}>
+function LiveRow({session}:{session:LiveSession}) {
+  const [error,setError] = useState('')
+  return <div className="agent-row">
     <div className={`agent-icon ${session.provider}`}><Bot size={17}/></div>
-    <div className="agent-main"><div className="agent-title"><strong>{session.display_name}</strong><span className={`execution ${session.execution_status}`}>{executionLabel(session.execution_status)}</span></div><span className="agent-task">{task?.title??'未关联任务'} · {project?.name??'未知项目'}</span><span className="agent-activity">{session.recent_activity??'等待活动'}</span></div>
-    {needsAttention && <span className="attention-label"><CircleAlert size={14}/>{attentionLabel(session.attention)}</span>}
-    <div className="agent-actions"><button title="定位终端" onClick={()=>command('focus_session',{sessionId:session.id}).catch(e=>alert(e))}><Terminal size={15}/></button>{session.execution_status!=='stopped'&&session.execution_status!=='completed'&&<button title="停止" onClick={()=>command('stop_session',{sessionId:session.id}).then(onChanged).catch(e=>alert(e))}><Square size={14}/></button>}<button title="人工接管" onClick={()=>command('take_over_session',{sessionId:session.id}).then(onChanged).catch(e=>alert(e))}><Pause size={14}/></button></div>
+    <div className="agent-main">
+      <div className="agent-title"><strong>{session.provider==='codex'?'Codex':'Claude Code'}</strong><span className="execution running">{session.tmux_session}:{session.pane}</span>{session.attached&&<span className="execution">已附着</span>}</div>
+      <span className="agent-task mono">{session.cwd}</span>
+      <span className="agent-activity">已运行 {session.uptime||'未知'} · pid {session.pid}{error&&` · ${error}`}</span>
+    </div>
+    <div className="agent-actions"><button title="定位终端" onClick={()=>{setError('');command('focus_tmux_session',{session:session.tmux_session,pane:session.pane}).catch(e=>setError(String(e)))}}><Terminal size={15}/></button></div>
   </div>
 }
 

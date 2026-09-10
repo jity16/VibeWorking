@@ -231,8 +231,15 @@ pub fn app_health() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn discovered_sessions(
+pub async fn live_sessions(
     state: State<'_, crate::AppState>,
-) -> Result<crate::discovery::DiscoveryReport, String> {
-    crate::discovery::discover(&state.db).await
+) -> Result<crate::discovery::LiveReport, String> {
+    crate::discovery::live_sessions(&state.db).await
+}
+
+/// Brings the terminal showing a live pane to the front. The pane is identified
+/// by tmux, so this is the one action we can offer without owning the session.
+#[tauri::command]
+pub async fn focus_tmux_session(session: String, pane: String) -> Result<(), String> {
+    crate::terminal::focus_pane(&session, &pane).await.map_err(|error| error.to_string())
 }

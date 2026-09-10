@@ -29,7 +29,7 @@ The app stores data under `~/Library/Application Support/Vibe Working/`. API key
 
 Codex uses the official app-server protocol when the installed CLI supports it. Claude Code uses a managed tmux session and hooks, and receives the task prompt as process argv. iTerm2 is not available on the development machine, so the first adapter targets Terminal.app/tmux and reports an unbound terminal rather than guessing.
 
-The Agents tab separates two things. Runs started from this app are tracked live and can be stopped or taken over. Sessions already on the machine — Codex threads via the app-server `thread/list` RPC, Claude Code transcripts from `~/.claude/projects` — are listed read-only and filed under the project whose root contains their working directory, or under 未分类. Adopting a discovered session is not implemented: that needs identity evidence tying a thread to a terminal.
+The Agents tab lists the Codex and Claude Code sessions running right now inside tmux, filed under the project whose root contains their working directory, or under 未分类; selecting a project scopes the view to it. A session that is closed stops appearing. Runs this app starts also create a tmux session, so they show up in the same list — there is no separate section for them. An agent running outside tmux is not visible, and binding a discovered pane to a Task is not implemented.
 
 Automatic continuation after a capacity failure is Codex-only: it is sent over the app-server RPC channel, where delivery is confirmed. There is deliberately no `tmux send-keys` path, because typing into a pane cannot be confirmed to have reached the agent. Live model calls, a real overload retry, and an approval round trip are still untested — they need network credentials.
 

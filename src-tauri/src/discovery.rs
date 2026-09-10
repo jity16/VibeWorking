@@ -1,61 +1,50 @@
-//! Read-only discovery of Codex and Claude Code sessions that this app did not
-//! start.
+//! Finds coding-agent sessions that are running right now inside tmux.
 //!
-//! Discovered rows are deliberately kept out of `agent_sessions`. A row in that
-//! table means "a run this app owns", and carries control mode, attention and
-//! retry budget that only make sense for something we launched. A session found
-//! on disk has none of that: we cannot prove which terminal it belongs to, we
-//! cannot stop it, and `thread/list` reports stored threads as `notLoaded`, so
-//! we do not know whether it is still running. It is history, and is presented
-//! as history.
+//! Identity is the tmux pane, not the conversation. Linking a live pane to a
+//! stored transcript would have to be guessed from working directory and
+//! recency, and that guess is provably wrong here: one tmux session on this
+//! machine holds two `codex` panes in the same directory. A pane is something we
+//! can verify, focus, and watch disappear when it closes.
+//!
+//! Consequently nothing is read from `~/.codex/sessions` or
+//! `~/.claude/projects`. Those hold finished conversations, and a finished
+//! conversation is not a running session.
 
 use crate::db::Database;
-use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::io::AsyncBufReadExt;
+use std::collections::HashMap;
 use tokio::process::Command;
-use tokio::time::{sleep, timeout, Duration};
-use tokio_tungstenite::{client_async, tungstenite::Message};
 
-/// The server caps a page well below whatever `limit` asks for, so reaching a
-/// useful depth means following `nextCursor`. Bounded: a machine here already
-/// holds over a thousand rollouts and nobody scrolls that far.
-const CODEX_PAGE: usize = 100;
-const CODEX_PAGES: usize = 3;
-const CODEX_DEADLINE: Duration = Duration::from_secs(20);
-/// Enough lines to reach the first record carrying `cwd` without reading whole
-/// transcripts, which run to megabytes.
-const CLAUDE_HEAD_LINES: usize = 60;
+/// Executable names, as reported by `ps comm`. `pane_current_command` is not
+/// usable: Claude Code rewrites its process title, so tmux reports it as its
+/// version string rather than as `claude`.
+const AGENTS: [&str; 2] = ["codex", "claude"];
+/// Guards against a cycle in a malformed process table.
+const MAX_TREE_DEPTH: usize = 12;
+const UNIT: &str = "\u{1f}";
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DiscoveredSession {
+pub struct LiveSession {
     pub provider: String,
-    pub session_id: String,
+    pub tmux_session: String,
+    pub pane: String,
+    pub pid: i64,
     pub cwd: String,
-    pub title: String,
-    pub preview: String,
-    pub updated_at: String,
-    /// `None` means no local project owns this directory — the UI files those
-    /// under 未分类 rather than inventing a project for them.
+    /// Wall-clock age of the agent process, as `ps` reports it.
+    pub uptime: String,
+    pub attached: bool,
+    /// `None` when no project root contains `cwd`; the UI files those under 未分类.
     pub project_id: Option<String>,
     pub project_name: Option<String>,
 }
 
-/// Errors from one provider never hide the other provider's results: a missing
-/// `codex` binary should not blank out the Claude list.
 #[derive(Debug, Clone, Serialize)]
-pub struct DiscoveryReport {
-    pub sessions: Vec<DiscoveredSession>,
+pub struct LiveReport {
+    pub sessions: Vec<LiveSession>,
     pub warnings: Vec<String>,
-    /// True when Codex had more stored threads than the page budget allowed, so
-    /// the list is the most recent ones rather than everything.
-    pub truncated: bool,
 }
 
-pub async fn discover(db: &Database) -> Result<DiscoveryReport, String> {
+pub async fn live_sessions(db: &Database) -> Result<LiveReport, String> {
     let projects = db
         .list_projects(true)
         .map_err(|error| error.to_string())?
@@ -63,29 +52,185 @@ pub async fn discover(db: &Database) -> Result<DiscoveryReport, String> {
         .map(|project| (project.id, project.name, normalize(&project.root_path)))
         .collect::<Vec<_>>();
 
-    let mut sessions = Vec::new();
     let mut warnings = Vec::new();
-    let mut truncated = false;
+    let panes = match list_panes().await {
+        Ok(panes) => panes,
+        Err(error) => {
+            // No tmux server running is the ordinary "nothing is going on" case,
+            // not a failure worth reporting.
+            if !error.is_empty() {
+                warnings.push(error);
+            }
+            Vec::new()
+        }
+    };
+    let processes = process_table().await.map_err(|error| format!("无法读取进程表：{error}"))?;
+    let children = child_index(&processes);
 
-    match timeout(CODEX_DEADLINE, discover_codex()).await {
-        Ok(Ok((found, more))) => { sessions.extend(found); truncated = more; }
-        Ok(Err(error)) => warnings.push(format!("Codex 会话未能读取：{error}")),
-        Err(_) => warnings.push("Codex 会话读取超时".into()),
+    let mut sessions = Vec::new();
+    for pane in panes {
+        let Some((pid, provider)) = find_agent(pane.pid, &processes, &children) else { continue };
+        let (id, name) = match match_project(&projects, &pane.cwd) {
+            Some((id, name)) => (Some(id), Some(name)),
+            None => (None, None),
+        };
+        sessions.push(LiveSession {
+            provider,
+            tmux_session: pane.session,
+            pane: pane.pane,
+            pid,
+            cwd: pane.cwd,
+            uptime: processes.get(&pid).map(|process| process.elapsed.clone()).unwrap_or_default(),
+            attached: pane.attached,
+            project_id: id,
+            project_name: name,
+        });
     }
-    match discover_claude().await {
-        Ok(found) => sessions.extend(found),
-        Err(error) => warnings.push(format!("Claude Code 会话未能读取：{error}")),
-    }
+    sessions.sort_by(|left, right| {
+        left.project_name
+            .is_none()
+            .cmp(&right.project_name.is_none())
+            .then_with(|| left.tmux_session.cmp(&right.tmux_session))
+            .then_with(|| left.pane.cmp(&right.pane))
+    });
+    Ok(LiveReport { sessions, warnings })
+}
 
-    for session in &mut sessions {
-        if let Some((id, name)) = match_project(&projects, &session.cwd) {
-            session.project_id = Some(id);
-            session.project_name = Some(name);
+// ------------------------------------------------------------ tmux panes
+
+#[derive(Debug, Clone)]
+struct Pane {
+    session: String,
+    pane: String,
+    pid: i64,
+    cwd: String,
+    attached: bool,
+}
+
+async fn list_panes() -> Result<Vec<Pane>, String> {
+    let tmux = crate::environment::resolve("tmux").ok_or_else(String::new)?;
+    let format = ["#{session_name}", "#{pane_id}", "#{pane_pid}", "#{pane_current_path}", "#{session_attached}"].join(UNIT);
+    let output = Command::new(tmux)
+        .args(["list-panes", "-a", "-F", &format])
+        .output()
+        .await
+        .map_err(|error| format!("无法列出 tmux 窗格：{error}"))?;
+    if !output.status.success() {
+        // `no server running` simply means there is nothing to show.
+        return Err(String::new());
+    }
+    Ok(parse_panes(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// A unit separator keeps a working directory containing spaces intact.
+fn parse_panes(text: &str) -> Vec<Pane> {
+    text.lines()
+        .filter_map(|line| {
+            let fields = line.split(UNIT).collect::<Vec<_>>();
+            if fields.len() < 5 {
+                return None;
+            }
+            Some(Pane {
+                session: fields[0].to_string(),
+                pane: fields[1].to_string(),
+                pid: fields[2].trim().parse().ok()?,
+                cwd: fields[3].to_string(),
+                attached: fields[4].trim() != "0",
+            })
+        })
+        .collect()
+}
+
+// -------------------------------------------------------- process table
+
+#[derive(Debug, Clone)]
+struct Process {
+    parent: i64,
+    command: String,
+    elapsed: String,
+}
+
+async fn process_table() -> Result<HashMap<i64, Process>, String> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,etime=,comm="])
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(parse_processes(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// `comm` is requested last because an executable path may contain spaces:
+/// everything after the third column belongs to it.
+fn parse_processes(text: &str) -> HashMap<i64, Process> {
+    let mut table = HashMap::new();
+    for line in text.lines() {
+        let Some((pid, parent, elapsed, command)) = split_columns(line) else { continue };
+        let Ok(pid) = pid.parse::<i64>() else { continue };
+        let Ok(parent) = parent.parse::<i64>() else { continue };
+        table.insert(pid, Process { parent, command: command.to_string(), elapsed: elapsed.to_string() });
+    }
+    table
+}
+
+/// `ps` right-aligns its numeric columns with runs of spaces, so the first three
+/// fields cannot be taken by splitting on a fixed count — the padding would be
+/// counted as fields. Take three tokens, then keep the rest verbatim so a
+/// command containing spaces survives.
+fn split_columns(line: &str) -> Option<(&str, &str, &str, &str)> {
+    let mut rest = line.trim_start();
+    let mut fields = [""; 3];
+    for slot in fields.iter_mut() {
+        let end = rest.find(char::is_whitespace)?;
+        *slot = &rest[..end];
+        rest = rest[end..].trim_start();
+    }
+    Some((fields[0], fields[1], fields[2], rest.trim_end()))
+}
+
+fn child_index(processes: &HashMap<i64, Process>) -> HashMap<i64, Vec<i64>> {
+    let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (pid, process) in processes {
+        children.entry(process.parent).or_default().push(*pid);
+    }
+    for list in children.values_mut() {
+        list.sort_unstable();
+    }
+    children
+}
+
+/// A pane's own process is usually the shell; the agent runs underneath it.
+fn find_agent(
+    pane_pid: i64,
+    processes: &HashMap<i64, Process>,
+    children: &HashMap<i64, Vec<i64>>,
+) -> Option<(i64, String)> {
+    let mut frontier = vec![(pane_pid, 0usize)];
+    let mut seen = Vec::new();
+    while let Some((pid, depth)) = frontier.pop() {
+        if depth > MAX_TREE_DEPTH || seen.contains(&pid) {
+            continue;
+        }
+        seen.push(pid);
+        if let Some(process) = processes.get(&pid) {
+            let name = std::path::Path::new(&process.command)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| process.command.clone());
+            if let Some(agent) = AGENTS.iter().find(|agent| **agent == name) {
+                return Some((pid, (*agent).to_string()));
+            }
+        }
+        for child in children.get(&pid).into_iter().flatten() {
+            frontier.push((*child, depth + 1));
         }
     }
-    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    Ok(DiscoveryReport { sessions, warnings, truncated })
+    None
 }
+
+// -------------------------------------------------------------- projects
 
 /// Longest matching root wins, so a project nested inside another is not
 /// swallowed by its parent.
@@ -103,239 +248,6 @@ fn normalize(path: &str) -> String {
     std::fs::canonicalize(trimmed)
         .map(|value| value.to_string_lossy().trim_end_matches('/').to_string())
         .unwrap_or_else(|_| trimmed.to_string())
-}
-
-fn seconds_to_rfc3339(seconds: i64) -> String {
-    chrono::DateTime::from_timestamp(seconds, 0)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339()
-}
-
-// ---------------------------------------------------------------- Codex
-
-/// Asks the installed app-server for its stored threads — the same interface the
-/// official desktop client lists sessions with. Reading the rollout files
-/// directly would mean reverse-engineering a format that is free to change.
-async fn discover_codex() -> Result<(Vec<DiscoveredSession>, bool), String> {
-    let socket = std::env::temp_dir().join(format!("vibe-working-discovery-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&socket);
-    let codex = crate::environment::resolve("codex").ok_or_else(|| crate::environment::missing_program("codex"))?;
-    let mut child = Command::new(codex)
-        .args(["app-server", "--listen", &format!("unix://{}", socket.display())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("无法启动 codex app-server：{error}"))?;
-
-    let result = list_threads(&socket).await;
-    let _ = child.kill().await;
-    let _ = std::fs::remove_file(&socket);
-    result
-}
-
-async fn list_threads(socket: &Path) -> Result<(Vec<DiscoveredSession>, bool), String> {
-    let mut stream = None;
-    for _ in 0..80 {
-        if let Ok(connected) = tokio::net::UnixStream::connect(socket).await {
-            stream = Some(connected);
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    let stream = stream.ok_or("codex app-server socket did not become ready")?;
-    let (websocket, _) = client_async("ws://localhost", stream)
-        .await
-        .map_err(|error| error.to_string())?;
-    let (mut writer, mut reader) = websocket.split();
-    let frame = |value: Value| Message::Text(value.to_string().into());
-
-    writer
-        .send(frame(json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "clientInfo": { "name": "vibe_working", "title": "Vibe Working", "version": "0.1.0" },
-                "capabilities": { "experimentalApi": true }
-            }
-        })))
-        .await
-        .map_err(|error| error.to_string())?;
-    let handshake = read_response(&mut reader, 1).await?;
-    if let Some(error) = handshake.get("error") {
-        return Err(error.to_string());
-    }
-    writer
-        .send(frame(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} })))
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut sessions = Vec::new();
-    let mut cursor: Option<String> = None;
-    for page in 0..CODEX_PAGES {
-        let id = 2 + page as u64;
-        let mut params = json!({ "limit": CODEX_PAGE });
-        if let Some(cursor) = &cursor {
-            params["cursor"] = Value::String(cursor.clone());
-        }
-        writer
-            .send(frame(json!({ "jsonrpc": "2.0", "id": id, "method": "thread/list", "params": params })))
-            .await
-            .map_err(|error| error.to_string())?;
-        let listed = read_response(&mut reader, id).await?;
-        if let Some(error) = listed.get("error") {
-            return Err(error.to_string());
-        }
-        let threads = listed.pointer("/result/data").and_then(Value::as_array).cloned().unwrap_or_default();
-        if threads.is_empty() {
-            break;
-        }
-        sessions.extend(threads.iter().filter_map(thread_to_session));
-        match listed.pointer("/result/nextCursor").and_then(Value::as_str) {
-            Some(next) => cursor = Some(next.to_string()),
-            None => { cursor = None; break; }
-        }
-    }
-    Ok((sessions, cursor.is_some()))
-}
-
-fn thread_to_session(thread: &Value) -> Option<DiscoveredSession> {
-    let id = thread.get("id").and_then(Value::as_str)?;
-    let cwd = thread.get("cwd").and_then(Value::as_str)?;
-    let preview = thread.get("preview").and_then(Value::as_str).unwrap_or_default();
-    let name = thread.get("name").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
-    Some(DiscoveredSession {
-        provider: "codex".into(),
-        session_id: id.to_string(),
-        cwd: cwd.to_string(),
-        title: name.map(str::to_owned).unwrap_or_else(|| summarize(preview)),
-        preview: summarize(preview),
-        updated_at: seconds_to_rfc3339(thread.get("updatedAt").and_then(Value::as_i64).unwrap_or_default()),
-        project_id: None,
-        project_name: None,
-    })
-}
-
-// --------------------------------------------------------------- Claude
-
-/// Claude Code has no equivalent query interface, so this reads the transcript
-/// store. The directory name is the working directory with separators replaced,
-/// which is lossy and cannot be decoded back into a path — the `cwd` recorded
-/// inside each transcript is the only trustworthy source.
-async fn discover_claude() -> Result<Vec<DiscoveredSession>, String> {
-    let Some(root) = dirs::home_dir().map(|home| home.join(".claude/projects")) else {
-        return Ok(Vec::new());
-    };
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut sessions = Vec::new();
-    let mut directories = tokio::fs::read_dir(&root).await.map_err(|error| error.to_string())?;
-    while let Ok(Some(directory)) = directories.next_entry().await {
-        if !directory.path().is_dir() {
-            continue;
-        }
-        let Ok(mut files) = tokio::fs::read_dir(directory.path()).await else { continue };
-        while let Ok(Some(file)) = files.next_entry().await {
-            let path = file.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Some(session) = read_claude_transcript(&path).await {
-                sessions.push(session);
-            }
-        }
-    }
-    Ok(sessions)
-}
-
-async fn read_claude_transcript(path: &PathBuf) -> Option<DiscoveredSession> {
-    let file = tokio::fs::File::open(path).await.ok()?;
-    let mut lines = tokio::io::BufReader::new(file).lines();
-    let mut cwd = None;
-    let mut timestamp = None;
-    let mut preview = None;
-    for _ in 0..CLAUDE_HEAD_LINES {
-        let Ok(Some(line)) = lines.next_line().await else { break };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
-        if cwd.is_none() {
-            cwd = value.get("cwd").and_then(Value::as_str).map(str::to_owned);
-        }
-        if timestamp.is_none() {
-            timestamp = value.get("timestamp").and_then(Value::as_str).map(str::to_owned);
-        }
-        if preview.is_none() && value.get("type").and_then(Value::as_str) == Some("user") {
-            preview = first_user_text(&value);
-        }
-        if cwd.is_some() && timestamp.is_some() && preview.is_some() {
-            break;
-        }
-    }
-    let cwd = cwd?;
-    let session_id = path.file_stem()?.to_string_lossy().to_string();
-    let preview = summarize(preview.as_deref().unwrap_or_default());
-    Some(DiscoveredSession {
-        provider: "claude".into(),
-        session_id,
-        cwd,
-        title: if preview.is_empty() { "Claude Code 会话".into() } else { preview.clone() },
-        preview,
-        updated_at: match timestamp {
-            Some(value) => value,
-            None => modified_at(path).await,
-        },
-        project_id: None,
-        project_name: None,
-    })
-}
-
-fn first_user_text(value: &Value) -> Option<String> {
-    let content = value.pointer("/message/content")?;
-    if let Some(text) = content.as_str() {
-        return Some(text.to_string());
-    }
-    content.as_array()?.iter().find_map(|part| {
-        (part.get("type").and_then(Value::as_str) == Some("text"))
-            .then(|| part.get("text").and_then(Value::as_str).map(str::to_owned))
-            .flatten()
-    })
-}
-
-async fn modified_at(path: &PathBuf) -> String {
-    tokio::fs::metadata(path)
-        .await
-        .ok()
-        .and_then(|data| data.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|value| seconds_to_rfc3339(value.as_secs() as i64))
-        .unwrap_or_default()
-}
-
-// ---------------------------------------------------------------- shared
-
-fn summarize(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= 140 {
-        return collapsed;
-    }
-    collapsed.chars().take(140).collect::<String>() + "…"
-}
-
-async fn read_response<S>(reader: &mut S, id: u64) -> Result<Value, String>
-where
-    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    while let Some(message) = reader.next().await {
-        let Ok(message) = message else { continue };
-        let text = match message {
-            Message::Text(text) => text.to_string(),
-            Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            _ => continue,
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
-        if value.get("id").and_then(Value::as_u64) == Some(id) {
-            return Ok(value);
-        }
-    }
-    Err(format!("app-server closed before answering request {id}"))
 }
 
 #[cfg(test)]
@@ -357,8 +269,6 @@ mod tests {
 
     #[test]
     fn a_sibling_prefix_is_not_a_match() {
-        // "/Users/x/WorkspaceOther" starts with "/Users/x/Workspace" as a string
-        // but is a different directory.
         assert!(match_project(&projects(), "/Users/x/WorkspaceOther").is_none());
     }
 
@@ -368,8 +278,54 @@ mod tests {
     }
 
     #[test]
-    fn summaries_collapse_whitespace_and_stay_bounded() {
-        assert_eq!(summarize("  hello\n\nworld  "), "hello world");
-        assert_eq!(summarize(&"x".repeat(500)).chars().count(), 141);
+    fn panes_survive_a_working_directory_containing_spaces() {
+        let line = ["work", "%3", "42", "/Users/x/My Project", "1"].join(UNIT);
+        let panes = parse_panes(&line);
+        assert_eq!(panes[0].cwd, "/Users/x/My Project");
+        assert_eq!(panes[0].pid, 42);
+        assert!(panes[0].attached);
+    }
+
+    #[test]
+    fn a_detached_session_is_still_a_live_session() {
+        let line = ["work", "%3", "42", "/tmp", "0"].join(UNIT);
+        assert!(!parse_panes(&line)[0].attached);
+    }
+
+    #[test]
+    fn the_agent_is_found_below_the_pane_shell() {
+        // tmux reports the pane's shell; the agent runs underneath it.
+        let processes = parse_processes("  100     1 02:10:33 -zsh\n  200   100 01:59:00 codex\n");
+        let children = child_index(&processes);
+        assert_eq!(find_agent(100, &processes, &children), Some((200, "codex".into())));
+    }
+
+    #[test]
+    fn a_pane_without_an_agent_is_not_reported() {
+        let processes = parse_processes("  100     1 02:10:33 -zsh\n  200   100 01:59:00 node\n");
+        let children = child_index(&processes);
+        assert!(find_agent(100, &processes, &children).is_none());
+    }
+
+    #[test]
+    fn an_executable_path_with_spaces_still_resolves_to_its_name() {
+        let processes = parse_processes("  100     1 02:10:33 /Applications/My Tools/claude\n");
+        let children = child_index(&processes);
+        assert_eq!(find_agent(100, &processes, &children), Some((100, "claude".into())));
+    }
+
+    #[test]
+    fn the_padding_ps_uses_to_align_columns_is_not_read_as_fields() {
+        let table = parse_processes("      1     0 31-04:31:40 launchd\n  98131  4210 31-04:31:40 codex\n");
+        assert_eq!(table[&98131].parent, 4210);
+        assert_eq!(table[&98131].command, "codex");
+        assert_eq!(table[&98131].elapsed, "31-04:31:40");
+    }
+
+    #[test]
+    fn a_parent_cycle_cannot_hang_the_scan() {
+        let processes = parse_processes("  100   200 01:00:00 -zsh\n  200   100 01:00:00 -zsh\n");
+        let children = child_index(&processes);
+        assert!(find_agent(100, &processes, &children).is_none());
     }
 }

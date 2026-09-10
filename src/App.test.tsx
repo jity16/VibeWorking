@@ -105,63 +105,69 @@ describe('a project with no tasks', () => {
   })
 })
 
-describe('discovered sessions', () => {
-  const discovered = (over: Record<string, unknown>) => ({ provider: 'codex', session_id: 's', cwd: '/x', title: 't', preview: 'p', updated_at: '2026-09-10T00:00:00Z', project_id: null, project_name: null, ...over })
+describe('running agents', () => {
+  const live = (over: Record<string, unknown>) => ({ provider: 'codex', tmux_session: 'work', pane: '%1', pid: 1, cwd: '/x', uptime: '01:00', attached: false, project_id: null, project_name: null, ...over })
 
-  it('groups by project, puts 未分类 last, and leaves it collapsed', async () => {
-    // 未分类 is where everything the user never registered lands — hundreds of
-    // rows on a real machine. Expanding it by default would bury the sessions
-    // that belong to a project.
+  const withSessions = (sessions: Record<string, unknown>[]) => {
     invoke.mockImplementation((name: string) => {
       if (name === 'bootstrap') return Promise.resolve({ projects: [project], tasks: [], sessions: [], settings: emptySettings })
-      if (name === 'discovered_sessions') return Promise.resolve({
-        warnings: [],
-        truncated: false,
-        sessions: [
-          discovered({ session_id: 'a', project_id: 'p1', project_name: '端砚', cwd: '/tmp/a' }),
-          discovered({ session_id: 'b', cwd: '/elsewhere' }),
-          discovered({ session_id: 'c', provider: 'claude', cwd: '/elsewhere/two' }),
-        ],
-      })
+      if (name === 'live_sessions') return Promise.resolve({ warnings: [], sessions })
       return Promise.reject(new Error(`unexpected command ${name}`))
     })
+  }
 
-    await act(async () => { root.render(<App />) })
-    await flush()
-    const agents = [...container.querySelectorAll<HTMLButtonElement>('.tab')].find(tab => tab.textContent?.includes('Agents'))!
-    await act(async () => { agents.click() })
-    await flush()
-
-    const groups = [...container.querySelectorAll('.discovered .group-heading')].map(heading => heading.textContent)
-    expect(groups).toHaveLength(2)
-    expect(groups[0]).toContain('端砚')
-    expect(groups[1]).toContain('未分类')
-    expect(groups[1]).toContain('2')
-
-    const rendered = [...container.querySelectorAll('.discovered .discovered-row')]
-    expect(rendered, 'only the project group starts expanded').toHaveLength(1)
-
-    await act(async () => { (container.querySelectorAll<HTMLButtonElement>('.discovered .group-heading')[1]).click() })
-    expect(container.querySelectorAll('.discovered .discovered-row')).toHaveLength(3)
-  })
-
-  it('reports a provider failure without hiding the other provider', async () => {
-    invoke.mockImplementation((name: string) => {
-      if (name === 'bootstrap') return Promise.resolve({ projects: [project], tasks: [], sessions: [], settings: emptySettings })
-      if (name === 'discovered_sessions') return Promise.resolve({
-        warnings: ['Codex 会话未能读取：boom'],
-        truncated: false,
-        sessions: [discovered({ provider: 'claude', session_id: 'c' })],
-      })
-      return Promise.reject(new Error(`unexpected command ${name}`))
-    })
-
+  const openAgents = async () => {
     await act(async () => { root.render(<App />) })
     await flush()
     await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('.tab')].find(tab => tab.textContent?.includes('Agents'))!.click() })
     await flush()
+  }
 
-    expect(container.querySelector('.discovered .form-error')!.textContent).toContain('Codex 会话未能读取')
-    expect(container.querySelectorAll('.discovered .discovered-row').length).toBeGreaterThan(0)
+  it('groups by project across all projects, with 未分类 last', async () => {
+    withSessions([
+      live({ pane: '%1', project_id: 'p1', project_name: '端砚', cwd: '/tmp/a' }),
+      live({ pane: '%2', cwd: '/elsewhere' }),
+      live({ pane: '%3', provider: 'claude', cwd: '/elsewhere/two' }),
+    ])
+    await openAgents()
+
+    const groups = [...container.querySelectorAll('.group-heading')].map(heading => heading.textContent)
+    expect(groups[0]).toContain('端砚')
+    expect(groups[1]).toContain('未分类')
+    expect(container.querySelectorAll('.agent-row')).toHaveLength(3)
+  })
+
+  it('shows only the selected project\'s sessions', async () => {
+    withSessions([
+      live({ pane: '%1', project_id: 'p1', project_name: '端砚', cwd: '/tmp/a' }),
+      live({ pane: '%2', cwd: '/elsewhere' }),
+    ])
+    await openAgents()
+    // Selecting a project in the sidebar scopes the Agents view too.
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('.project-row')].find(row => row.textContent?.includes('端砚'))!.click() })
+    await flush()
+
+    const rows = [...container.querySelectorAll('.agent-row')]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain('/tmp/a')
+    expect(container.querySelectorAll('.group-heading'), 'a single project needs no grouping').toHaveLength(0)
+  })
+
+  it('says the project has nothing running rather than showing an empty list', async () => {
+    withSessions([live({ pane: '%2', cwd: '/elsewhere' })])
+    await openAgents()
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('.project-row')].find(row => row.textContent?.includes('端砚'))!.click() })
+    await flush()
+
+    expect(container.querySelectorAll('.agent-row')).toHaveLength(0)
+    expect(container.querySelector('.empty-state')!.textContent).toContain('端砚')
+  })
+
+  it('focuses the pane it actually lists', async () => {
+    withSessions([live({ tmux_session: 'cat', pane: '%35', project_id: 'p1', project_name: '端砚' })])
+    await openAgents()
+    await act(async () => { container.querySelector<HTMLButtonElement>('.agent-actions button')!.click() })
+
+    expect(invoke).toHaveBeenCalledWith('focus_tmux_session', { session: 'cat', pane: '%35' })
   })
 })

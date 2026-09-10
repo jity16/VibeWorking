@@ -133,6 +133,28 @@ pub fn fingerprint(command: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Focuses a pane discovered by scanning, which this app never created. The
+/// names come back from tmux itself, but they arrive here through the UI, so
+/// they are checked before being spliced into a shell command.
+pub async fn focus_pane(session: &str, pane: &str) -> Result<(), TerminalError> {
+    if session.is_empty() || session.contains(['\'', '"', '\n', ';', '$', '`']) {
+        return Err(TerminalError::Command("invalid tmux session name".into()));
+    }
+    if !pane.starts_with('%') || !pane[1..].chars().all(|c| c.is_ascii_digit()) {
+        return Err(TerminalError::Command("invalid tmux pane id".into()));
+    }
+    let target = TmuxTarget { session: session.to_string(), pane: pane.to_string() };
+    if !tmux_exists(&target).await {
+        return Err(TerminalError::Unverified);
+    }
+    // Select the pane first so attaching lands on the agent, not on whatever
+    // pane the session was last left on.
+    if let Ok(mut command) = tmux_command() {
+        let _ = command.args(["select-pane", "-t", pane]).output().await;
+    }
+    focus_terminal(&target).await
+}
+
 pub async fn focus_terminal(target: &TmuxTarget) -> Result<(), TerminalError> {
     if !tmux_exists(target).await {
         return Err(TerminalError::Unverified);

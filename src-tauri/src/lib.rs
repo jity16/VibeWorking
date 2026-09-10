@@ -9,7 +9,7 @@ mod persistence;
 mod proxy;
 mod retry;
 mod state;
-mod terminal;
+pub mod terminal;
 
 use agents::AgentManager;
 use db::Database;
@@ -64,7 +64,8 @@ pub fn run() {
             commands::restore_data,
             commands::task_detail,
             commands::app_health,
-            commands::discovered_sessions
+            commands::live_sessions,
+            commands::focus_tmux_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vibe Working");
