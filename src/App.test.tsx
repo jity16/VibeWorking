@@ -66,3 +66,23 @@ describe('creating the first project', () => {
     expect(container.querySelector('.project-list')!.textContent).toContain('端砚')
   })
 })
+
+describe('a project with no tasks', () => {
+  it('offers exactly one way to create a task', async () => {
+    // The pane heading already carries the create action. The empty state used
+    // to render a second, identically styled primary button next to it.
+    invoke.mockImplementation((name: string) =>
+      name === 'bootstrap'
+        ? Promise.resolve({ projects: [project], tasks: [], sessions: [], settings: emptySettings })
+        : Promise.reject(new Error(`unexpected command ${name}`)),
+    )
+
+    await act(async () => { root.render(<App />) })
+    await flush()
+
+    const create = [...container.querySelectorAll('.list-pane button')].filter(button => button.textContent?.includes('新建任务'))
+    expect(create).toHaveLength(1)
+    expect(container.querySelector('.pane-heading')!.contains(create[0]), 'the create action belongs in the heading, where it stays put').toBe(true)
+    expect(container.querySelector('.empty-state')!.textContent).toContain('新建任务')
+  })
+})
