@@ -27,8 +27,6 @@ pub enum ProxyError {
     Network(String),
     #[error("proxy request timed out")]
     Timeout,
-    #[error("proxy request cancelled")]
-    Cancelled,
     #[error("keychain error: {0}")]
     Keychain(String),
 }

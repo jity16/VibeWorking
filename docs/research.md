@@ -25,6 +25,29 @@
 - Codex App Server 的官方文档明确提供 Unix/WebSocket transport 与 `codex --remote unix://…`，实现将以此为托管链路。
 - 受限环境没有把用户任务提交到真实模型；因此“启动 → 实时事件 → 人工输入 → 同会话终端定位 → 结束”的线上模型联调仍标记为未实测，开发测试使用协议 fixture 和本机 CLI smoke 命令，不能视为供应商联调成功。
 
+### 2026-09-10 针对本机 CLI 的协议核对
+
+用 `codex app-server generate-json-schema --experimental` 生成本机 0.153.4 的 schema，逐条比对代码里实际发送和读取的字段：
+
+| 代码位置 | 断言 | 结果 |
+| --- | --- | --- |
+| `codex app-server --listen unix://PATH` | `--listen` 接受 `unix://PATH` | 通过 |
+| `codex --remote <ADDR>` | 终端可连同一 app-server | 通过（flag 存在） |
+| `initialize` / `initialized` | 均在 `ClientRequest` / `ClientNotification` 中 | 通过 |
+| `thread/start` → `/thread/id` | `ThreadStartResponse.thread` 必填，`Thread.id` 必填 | 通过 |
+| `turn/start` params `{threadId,input}` | 两者均为必填；`input` 为 `UserInput[]`，`{type:"text",text}` 合法 | 通过 |
+| `turn/start` → `/turn/id` | `TurnStartResponse.turn`，`Turn.id` 必填 | 通过 |
+| `thread/read` → `/thread/status/type == "idle"` | `ThreadStatus` 是带 `type` 的 oneOf，含 `idle` | 通过 |
+| `/turn/error/codexErrorInfo == "serverOverloaded"` | `CodexErrorInfo` 含该字符串变体 | 通过 |
+| 归约用到的事件名 | 全部出现在 `ServerNotification` / `ServerRequest` | 通过 |
+| `claude --session-id/--name/--settings/--permission-mode manual` | 均见于 `claude --help` | 通过 |
+| `claude -- <prompt>` | `--` 停止选项解析，负号开头的 prompt 也能送达 | 通过（对照 `claude --未知flag` 报错） |
+| tmux `new-session -d -s … -e K=V -- argv…` | 多行 argv 原样传给子进程 | 通过（实测写文件回读） |
+
+此外 `src-tauri/tests/codex_handshake.rs` 会真实启动本机 `codex app-server --listen unix://…`，完成 WebSocket 升级，跑通 `initialize` → `initialized` → `thread/start`，并断言响应里存在适配器实际读取的 `/thread/id`。它在 `turn/start` 之前停止，因此不会向模型提交任何内容。默认 `#[ignore]`，用 `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored` 运行；2026-09-10 在本机通过。
+
+未覆盖：真实模型调用、真实 overload 重试、审批往返。这些需要联网凭据，仍标记未实测。
+
 ## 版本与兼容性策略
 
 启动时记录 CLI 版本和能力探测结果。Codex 版本不支持 app-server/Unix transport 时降级为只读发现；Claude 版本不支持所需 hook 字段时降级为 tmux 观察。未知事件保留原始 JSON 并归约为 `unknown`/`disconnected`，不猜测为完成。 

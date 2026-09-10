@@ -90,50 +90,10 @@ pub async fn tmux_exists(target: &TmuxTarget) -> bool {
         .unwrap_or(false)
 }
 
-pub async fn tmux_send(target: &TmuxTarget, text: &str) -> Result<(), TerminalError> {
-    if !tmux_exists(target).await {
-        return Err(TerminalError::Unverified);
-    }
-    let output = Command::new("tmux")
-        .args(["send-keys", "-l", "-t", &target.pane, text])
-        .output()
-        .await
-        .map_err(|e| TerminalError::Command(e.to_string()))?;
-    if !output.status.success() {
-        return Err(TerminalError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let output = Command::new("tmux")
-        .args(["send-keys", "-t", &target.pane, "C-m"])
-        .output()
-        .await
-        .map_err(|e| TerminalError::Command(e.to_string()))?;
-    if !output.status.success() {
-        return Err(TerminalError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    Ok(())
-}
-
-pub async fn tmux_capture(target: &TmuxTarget, lines: i32) -> Result<String, TerminalError> {
-    if !tmux_exists(target).await {
-        return Err(TerminalError::Unverified);
-    }
-    let start = format!("-{lines}");
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-S", &start, "-t", &target.pane])
-        .output()
-        .await
-        .map_err(|e| TerminalError::Command(e.to_string()))?;
-    if !output.status.success() {
-        return Err(TerminalError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
+// Deliberately absent: send-keys / capture-pane helpers. Typing into a pane
+// cannot be confirmed to have reached the agent, so no automated path may use
+// it — the prompt is delivered as process argv and continuations go over the
+// app-server RPC channel only.
 
 pub async fn verify_binding(binding: &TerminalBinding) -> Result<bool, TerminalError> {
     if binding.target_kind != "tmux" {

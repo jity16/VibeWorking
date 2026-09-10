@@ -4,7 +4,7 @@ use rand::Rng;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetryDecision { Schedule { delay_seconds: i64 }, Cancel, Escalate }
+pub enum RetryDecision { Send, Wait { delay_seconds: i64 }, Cancel, Escalate }
 
 pub struct RetryController;
 
@@ -20,9 +20,9 @@ impl RetryController {
         if now >= deadline { return RetryDecision::Escalate; }
         if session.execution_status != "backoff" || session.control_mode != "automation" || session.attention != "none" || approval_pending || !input_ready || !binding_verified { return RetryDecision::Cancel; }
         if let Some(next) = &job.next_attempt_at {
-            if let Ok(next) = DateTime::parse_from_rfc3339(next) { if now < next.with_timezone(&Utc) { return RetryDecision::Schedule { delay_seconds: (next.with_timezone(&Utc) - now).num_seconds().max(1) }; } }
+            if let Ok(next) = DateTime::parse_from_rfc3339(next) { if now < next.with_timezone(&Utc) { return RetryDecision::Wait { delay_seconds: (next.with_timezone(&Utc) - now).num_seconds().max(1) }; } }
         }
-        RetryDecision::Schedule { delay_seconds: jittered_delay(job.attempts) }
+        RetryDecision::Send
     }
 
     pub fn mark_sent(job: &mut RetryJob, now: DateTime<Utc>) { job.attempts += 1; job.status = "sent".into(); job.next_attempt_at = None; job.last_error = None; let _ = now; }
@@ -41,4 +41,10 @@ mod tests {
     fn session() -> AgentSession { AgentSession { id:"s".into(),project_id:"p".into(),task_id:Some("t".into()),provider:"codex".into(),display_name:"x".into(),provider_session_id:Some("thr".into()),process_id:Some(1),execution_status:"backoff".into(),connectivity_status:"connected".into(),control_mode:"automation".into(),attention:"none".into(),current_step:None,recent_activity:None,last_activity_at:None,terminal_bound:true,created_at:"".into(),updated_at:"".into() } }
     #[test] fn budget_escalates() { let now=Utc::now(); let mut j=RetryController::new_job(&session(),"r","e",now); j.attempts=5; assert_eq!(RetryController::decide(&j,&session(),now,true,false,true,false),RetryDecision::Escalate); }
     #[test] fn approval_cancels_queued_send() { let now=Utc::now(); let j=RetryController::new_job(&session(),"r","e",now); assert_eq!(RetryController::decide(&j,&session(),now+Duration::seconds(31),true,true,true,false),RetryDecision::Cancel); }
+    #[test] fn waits_until_the_scheduled_moment_then_sends() {
+        let now=Utc::now(); let j=RetryController::new_job(&session(),"r","e",now);
+        assert!(matches!(RetryController::decide(&j,&session(),now,true,false,true,false),RetryDecision::Wait{..}));
+        assert_eq!(RetryController::decide(&j,&session(),now+Duration::seconds(31),true,false,true,false),RetryDecision::Send);
+    }
+    #[test] fn unverified_terminal_cancels_instead_of_sending() { let now=Utc::now(); let j=RetryController::new_job(&session(),"r","e",now); assert_eq!(RetryController::decide(&j,&session(),now+Duration::seconds(31),true,false,false,false),RetryDecision::Cancel); }
 }

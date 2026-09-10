@@ -15,6 +15,41 @@ Recovered starting state: research, architecture and requirements documents; 2,6
 5. Build the project/TODO/Agents/settings UI against the real backend.
 6. Run targeted tests, CLI smoke checks and macOS packaging; document measured coverage and remaining limitations.
 
+## Continuation status — 2026-09-10
+
+Steps 1–5 are implemented and building. Step 6 is done for the parts that do not
+need model credentials. What closing it out changed:
+
+- A Claude run now actually receives the task prompt. It was previously started
+  as a bare interactive session (`let _ = prompt`), so the Project → Task →
+  Prompt chain ended at the terminal. The prompt is passed as process argv after
+  `--`, which is verifiable and survives multi-line text and leading dashes.
+- `RetryController::decide` is the only place that decides whether a queued
+  continuation may be sent. `try_retry` previously duplicated the conditions
+  inline while `decide` sat unused, so the persisted policy and the code acting
+  on it could drift. `RetryDecision` now distinguishes `Send` from
+  `Wait`, and `try_retry` re-evaluates the whole policy after every wait instead
+  of trusting the snapshot it slept on.
+- The app-server event reader shares the real session registry. It used to build
+  a throwaway `AgentManager` with an empty runtime map, so anything routed
+  through the reader could not see live sessions. Finished runs are now dropped
+  from the registry, so Stop reports "not active" honestly rather than trying to
+  kill a dead tmux session.
+- `applyPatchApproval` / `execCommandApproval` (the server-request spellings the
+  installed CLI still emits) are recorded as pending approvals and reduce to
+  `approval_required`, instead of falling through to the default arm.
+- Removed the unused state enums, `tmux_send`, `tmux_capture` and
+  `ProxyError::Cancelled`. Typing into a pane cannot be confirmed to have
+  reached the agent, so keeping the helpers around invited a future caller to
+  use them for exactly the delivery this design refuses to trust.
+- Backup import is reachable from the UI; `restore_data` existed with no way to
+  call it.
+- Icons are generated and `bundle.icon` is populated, so `pnpm tauri build`
+  produces a real `Vibe Working.app`.
+
+Remaining and untested: live model calls, a real overload-triggered retry, and
+an approval round trip. All three need network credentials.
+
 ## Interface direction
 
 Use a compact native workstation layout: 216px project sidebar, grouped task/session list, unified detail inspector. Use the system macOS sans face for controls and SF Mono for paths and event metadata. Palette: canvas `#f7f8fa`, surface `#ffffff`, text `#202733`, muted `#697586`, action `#365f91`, attention `#98601c`; dark equivalents follow system preference. The distinctive element is a quiet task-to-execution trail in the inspector, backed only by saved prompt versions and actual runs. No statistics dashboard, welcome panels or fabricated activity.

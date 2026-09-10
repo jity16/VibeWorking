@@ -1,7 +1,7 @@
 use crate::db::{DbError, Database};
 use crate::models::{AgentSession, Recap, Run, StartRunInput, TerminalBinding};
 use crate::state::{self, ProviderEvent};
-use crate::retry::RetryController;
+use crate::retry::{RetryController, RetryDecision};
 use crate::terminal::{self, TmuxTarget};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -228,7 +228,7 @@ impl AgentManager {
                 "codex app-server socket did not become ready".into(),
             ));
         }
-        let client = RpcClient::connect(&socket, runtime.clone()).await?;
+        let client = RpcClient::connect(&socket, self.clone(), runtime.clone()).await?;
         runtime
             .rpc
             .lock()
@@ -297,6 +297,8 @@ impl AgentManager {
         let exe = std::env::current_exe().map_err(|e| AgentError::Message(e.to_string()))?;
         write_claude_settings(&settings_file, &exe, &runtime.session_id)?;
         let session_uuid = Uuid::new_v4().to_string();
+        // `claude [options] [prompt]`: `--` stops option parsing so a prompt that
+        // starts with a dash is still delivered as the prompt.
         let args = vec![
             "claude".into(),
             "--session-id".into(),
@@ -307,6 +309,8 @@ impl AgentManager {
             settings_file.to_string_lossy().to_string(),
             "--permission-mode".into(),
             "manual".into(),
+            "--".into(),
+            prompt.to_string(),
         ];
         let hook_env = hook_file.to_string_lossy().to_string();
         let target = terminal::tmux_create_with_env(
@@ -328,7 +332,6 @@ impl AgentManager {
         tokio::spawn(async move {
             monitor_claude_hooks(manager, monitor_runtime, hook_file).await;
         });
-        let _ = prompt;
         Ok(())
     }
 
@@ -549,38 +552,72 @@ impl AgentManager {
         };
         self.db.save_retry(&job)?;
         let manager = self.clone();
-        tokio::spawn(async move {
-            if let Some(next) = job.next_attempt_at.as_deref().and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()) {
-                let delay = (next.with_timezone(&Utc) - Utc::now()).to_std().unwrap_or(Duration::from_secs(0));
-                sleep(delay).await;
-            }
-            let _ = manager.try_retry(runtime, job.id).await;
-        });
+        // try_retry waits out `next_attempt_at` itself and re-checks the policy
+        // when it wakes, so the backoff is never trusted to a stale snapshot.
+        tokio::spawn(async move { let _ = manager.try_retry(runtime, job.id).await; });
         Ok(())
     }
 
     async fn try_retry(&self, runtime: Arc<Runtime>, job_id: String) -> Result<(), AgentError> {
-        let _control = runtime.control_gate.lock().await;
-        let mut job = self.db.retry_job(&runtime.session_id)?.ok_or_else(|| AgentError::Message("retry job disappeared".into()))?;
-        if job.id != job_id || job.status != "scheduled" || runtime.stopped.load(Ordering::SeqCst) { return Ok(()); }
-        let mut session = self.current_session(&runtime.session_id)?;
-        if job.attempts >= job.max_attempts || chrono::DateTime::parse_from_rfc3339(&job.total_deadline_at).map(|deadline| Utc::now() >= deadline).unwrap_or(true) {
-            job.status="exhausted".into(); self.db.save_retry(&job)?;
-            session.attention="recovery_failed".into(); session.execution_status="failed".into(); self.db.update_session_state(&session)?;
-            return Ok(());
-        }
-        let binding = self.db.terminal_binding(&runtime.session_id)?.ok_or_else(|| AgentError::Message("terminal binding missing; manual recovery required".into()))?;
-        if session.control_mode != "automation" || session.connectivity_status != "connected" || session.execution_status != "backoff" || session.attention != "none" || !terminal::verify_binding(&binding).await? { self.db.cancel_retries(&runtime.session_id)?; return Ok(()); }
-        let thread_id = session.provider_session_id.clone().ok_or_else(|| AgentError::Message("provider session id missing".into()))?;
-        let client = runtime.rpc.lock().map_err(|_| AgentError::Message("runtime lock poisoned".into()))?.clone().ok_or_else(|| AgentError::Message("control channel unavailable".into()))?;
-        if !runtime.pending_requests.lock().map_err(|_| AgentError::Message("request lock poisoned".into()))?.is_empty() { return Ok(()); }
-        let current = client.request("thread/read",json!({"threadId":thread_id,"includeTurns":true})).await?;
-        if current.pointer("/thread/status/type").and_then(Value::as_str) != Some("idle") { self.db.cancel_retries(&runtime.session_id)?; return Ok(()); }
-        job.status = "sending".into(); self.db.save_retry(&job)?;
-        let result = client.request("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":"continue"}]})).await;
-        match result {
-            Ok(_) => { RetryController::mark_sent(&mut job, Utc::now()); self.db.save_retry(&job)?; Ok(()) },
-            Err(error) => { job.status="uncertain".into(); job.last_error=Some(error.to_string()); self.db.save_retry(&job)?; session.attention="recovery_failed".into();session.execution_status="unknown".into();self.db.update_session_state(&session)?; Err(error) }
+        loop {
+            let control = runtime.control_gate.lock().await;
+            let mut job = self.db.retry_job(&runtime.session_id)?.ok_or_else(|| AgentError::Message("retry job disappeared".into()))?;
+            if job.id != job_id || job.status != "scheduled" { return Ok(()); }
+            let mut session = self.current_session(&runtime.session_id)?;
+
+            // Every condition that decides whether a queued continuation may be
+            // sent lives in RetryController::decide, so the persisted policy and
+            // the code that acts on it cannot drift apart.
+            let binding = self.db.terminal_binding(&runtime.session_id)?;
+            let binding_verified = match &binding {
+                Some(binding) => terminal::verify_binding(binding).await?,
+                None => false,
+            };
+            let approval_pending = !runtime
+                .pending_requests
+                .lock()
+                .map_err(|_| AgentError::Message("request lock poisoned".into()))?
+                .is_empty();
+            let client = runtime.rpc.lock().map_err(|_| AgentError::Message("runtime lock poisoned".into()))?.clone();
+            let input_ready = client.is_some() && session.connectivity_status == "connected";
+            let decision = RetryController::decide(
+                &job,
+                &session,
+                Utc::now(),
+                input_ready,
+                approval_pending,
+                binding_verified,
+                runtime.stopped.load(Ordering::SeqCst),
+            );
+            match decision {
+                RetryDecision::Cancel => { self.db.cancel_retries(&runtime.session_id)?; return Ok(()); }
+                RetryDecision::Escalate => {
+                    job.status = "exhausted".into();
+                    self.db.save_retry(&job)?;
+                    session.attention = "recovery_failed".into();
+                    session.execution_status = "failed".into();
+                    self.db.update_session_state(&session)?;
+                    return Ok(());
+                }
+                RetryDecision::Wait { delay_seconds } => {
+                    // Release the control gate while waiting so Stop and takeover
+                    // stay responsive, then re-evaluate from scratch.
+                    drop(control);
+                    sleep(Duration::from_secs(delay_seconds.max(1) as u64)).await;
+                    continue;
+                }
+                RetryDecision::Send => {}
+            }
+            let thread_id = session.provider_session_id.clone().ok_or_else(|| AgentError::Message("provider session id missing".into()))?;
+            let client = client.ok_or_else(|| AgentError::Message("control channel unavailable".into()))?;
+            let current = client.request("thread/read",json!({"threadId":thread_id,"includeTurns":true})).await?;
+            if current.pointer("/thread/status/type").and_then(Value::as_str) != Some("idle") { self.db.cancel_retries(&runtime.session_id)?; return Ok(()); }
+            job.status = "sending".into(); self.db.save_retry(&job)?;
+            let result = client.request("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":"continue"}]})).await;
+            return match result {
+                Ok(_) => { RetryController::mark_sent(&mut job, Utc::now()); self.db.save_retry(&job)?; Ok(()) },
+                Err(error) => { job.status="uncertain".into(); job.last_error=Some(error.to_string()); self.db.save_retry(&job)?; session.attention="recovery_failed".into();session.execution_status="unknown".into();self.db.update_session_state(&session)?; Err(error) }
+            };
         }
     }
 
@@ -633,12 +670,17 @@ impl AgentManager {
             created_at: Utc::now().to_rfc3339(),
         };
         self.db.insert_recap_if_absent(&recap)?;
+        // The run is over: drop the runtime so the registry does not grow for the
+        // lifetime of the app and a later Stop reports "not active" honestly.
+        if let Ok(mut runtimes) = self.runtimes.lock() {
+            runtimes.remove(&runtime.session_id);
+        }
         Ok(())
     }
 }
 
 impl RpcClient {
-    async fn connect(socket: &PathBuf, runtime: Arc<Runtime>) -> Result<Self, AgentError> {
+    async fn connect(socket: &PathBuf, manager: AgentManager, runtime: Arc<Runtime>) -> Result<Self, AgentError> {
         let stream = tokio::net::UnixStream::connect(socket)
             .await
             .map_err(|e| AgentError::Rpc(e.to_string()))?;
@@ -664,6 +706,7 @@ impl RpcClient {
             next_id: next_id.clone(),
         };
         let reader_client = read_client.clone();
+        let reader_manager = manager;
         tokio::spawn(async move {
             while let Some(message) = reader.next().await {
                 let Ok(message) = message else { break };
@@ -700,6 +743,7 @@ impl RpcClient {
                                 Some(id.to_string()),
                             );
                             let _ = handle_server_request_or_event(
+                                reader_manager.clone(),
                                 runtime.clone(),
                                 reader_client.clone(),
                                 id.clone(),
@@ -718,18 +762,10 @@ impl RpcClient {
                             .and_then(Value::as_str)
                             .map(str::to_owned),
                     );
-                    let manager = AgentManager {
-                        db: runtime.db.clone(),
-                        runtimes: Arc::new(Mutex::new(HashMap::new())),
-                    };
-                    let _ = manager.handle_event(runtime.clone(), event).await;
+                    let _ = reader_manager.handle_event(runtime.clone(), event).await;
                 }
             }
-            let manager = AgentManager {
-                db: runtime.db.clone(),
-                runtimes: Arc::new(Mutex::new(HashMap::new())),
-            };
-            let _ = manager
+            let _ = reader_manager
                 .handle_event(
                     runtime,
                     ProviderEvent::from_json(
@@ -794,6 +830,7 @@ impl RpcClient {
 }
 
 async fn handle_server_request_or_event(
+    manager: AgentManager,
     runtime: Arc<Runtime>,
     client: RpcClient,
     id: Value,
@@ -802,6 +839,7 @@ async fn handle_server_request_or_event(
     let method = event.event_type.clone();
     if method.contains("requestApproval")
         || method.contains("requestUserInput")
+        || method.ends_with("Approval")
         || method == "mcpServer/elicitation/request"
     {
         runtime
@@ -810,10 +848,6 @@ async fn handle_server_request_or_event(
             .map_err(|_| AgentError::Message("runtime lock poisoned".into()))?
             .insert(id.to_string(), event.payload.clone());
     }
-    let manager = AgentManager {
-        db: runtime.db.clone(),
-        runtimes: Arc::new(Mutex::new(HashMap::new())),
-    };
     manager.handle_event(runtime.clone(), event).await?;
     let _ = client; // explicit UI answer owns the response
     Ok(())

@@ -2,28 +2,9 @@ use crate::models::{AgentEvent, AgentSession, EventEnvelope};
 use chrono::Utc;
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Execution {
-    Idle,
-    Starting,
-    Running,
-    WaitingInput,
-    Backoff,
-    Completed,
-    Failed,
-    Stopped,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Connectivity { Connected, Reconnecting, Disconnected }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Control { Automation, Human }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Attention { None, InputRequired, ApprovalRequired, RecoveryFailed, Unverified }
-
+/// Execution, connectivity, control and attention are four independent
+/// dimensions persisted as text on `agent_sessions`; the reducer below is the
+/// only place that writes them.
 #[derive(Debug, Clone)]
 pub struct ProviderEvent {
     pub event_type: String,
@@ -60,7 +41,7 @@ pub fn reduce(session: &mut AgentSession, event: &ProviderEvent) -> EventEnvelop
                 session.current_step = active.and_then(|step| step.get("step").and_then(Value::as_str)).map(str::to_owned);
             }
         }
-        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval" | "approval_required" => {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval" | "applyPatchApproval" | "execCommandApproval" | "approval_required" => {
             session.execution_status = "waiting_input".into();
             session.attention = "approval_required".into();
             message = Some("Approval required".into());
