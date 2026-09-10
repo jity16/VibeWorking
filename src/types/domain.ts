@@ -4,3 +4,5 @@ export type PromptVersion = { id:string; task_id:string; content:string; source:
 export type AgentSession = { id:string; project_id:string; task_id:string|null; provider:string; display_name:string; provider_session_id:string|null; process_id:number|null; execution_status:string; connectivity_status:string; control_mode:string; attention:string; current_step:string|null; recent_activity:string|null; last_activity_at:string|null; terminal_bound:boolean; created_at:string; updated_at:string }
 export type ProxySettings = { base_url:string; protocol:string; model:string; timeout_seconds:number; api_key_ref:string|null; has_api_key:boolean }
 export type Bootstrap = { projects:Project[]; tasks:Task[]; sessions:AgentSession[]; settings:ProxySettings }
+export type DiscoveredSession = { provider:string; session_id:string; cwd:string; title:string; preview:string; updated_at:string; project_id:string|null; project_name:string|null }
+export type DiscoveryReport = { sessions:DiscoveredSession[]; warnings:string[]; truncated:boolean }

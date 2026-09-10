@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Bot, Check, ChevronDown, ChevronRight, CircleAlert, Copy, MoreHorizontal, Pause, Play, Plus, RefreshCw, Search, Settings, Square, Terminal, X } from 'lucide-react'
 import { agentEvents, command } from './lib/bridge'
 import { attentionLabel, executionLabel, statusLabel } from './lib/labels'
-import type { AgentSession, Bootstrap, Project, ProxySettings, Task } from './types/domain'
+import type { AgentSession, Bootstrap, DiscoveredSession, DiscoveryReport, Project, ProxySettings, Task } from './types/domain'
 
 type View = 'tasks'|'agents'|'settings'
 const emptyBootstrap:Bootstrap = {projects:[],tasks:[],sessions:[],settings:{base_url:'',protocol:'responses',model:'',timeout_seconds:90,api_key_ref:null,has_api_key:false}}
@@ -61,7 +61,62 @@ function TaskInspector({task,projects,onChanged}:{task:Task|null;projects:Projec
 }
 
 
-function AgentView({projects,tasks,sessions,onChanged}:{projects:Project[];tasks:Task[];sessions:AgentSession[];onChanged:()=>void}) { return <section className="agents-page"><div className="pane-heading"><div><p className="eyebrow">执行记录</p><h1>Agents</h1></div></div>{!sessions.length?<EmptyState text="还没有从这里发起过执行。这里只显示本应用启动的 Codex / Claude Code 会话，不会发现你在终端里自己开的会话。"/>:<div className="agent-list">{sessions.map(session=><AgentRow key={session.id} session={session} task={tasks.find(t=>t.id===session.task_id)} project={projects.find(p=>p.id===session.project_id)} onChanged={onChanged}/>)}</div>}</section> }
+function AgentView({projects,tasks,sessions,onChanged}:{projects:Project[];tasks:Task[];sessions:AgentSession[];onChanged:()=>void}) {
+  return <section className="agents-page">
+    <div className="pane-heading"><div><p className="eyebrow">执行记录</p><h1>Agents</h1></div></div>
+    <h3 className="section-title">本应用发起的执行</h3>
+    {!sessions.length
+      ? <EmptyState text="还没有从这里发起过执行。只有这一节里的会话是本应用启动并持续跟踪的。"/>
+      : <div className="agent-list">{sessions.map(session=><AgentRow key={session.id} session={session} task={tasks.find(t=>t.id===session.task_id)} project={projects.find(p=>p.id===session.project_id)} onChanged={onChanged}/>)}</div>}
+    <DiscoveredSessions/>
+  </section>
+}
+
+/** Scanning spawns a codex app-server and reads transcripts off disk, so it runs
+ *  when this tab is opened rather than on every bootstrap. */
+function DiscoveredSessions() {
+  const [report,setReport] = useState<DiscoveryReport|null>(null); const [loading,setLoading] = useState(true); const [error,setError] = useState('')
+  const scan = () => {setLoading(true);setError('');command<DiscoveryReport>('discovered_sessions').then(setReport).catch(e=>setError(String(e))).finally(()=>setLoading(false))}
+  useEffect(scan,[])
+  const groups = useMemo(() => {
+    const byProject = new Map<string,{name:string;sessions:DiscoveredSession[]}>()
+    for(const session of report?.sessions??[]) {
+      const key = session.project_id ?? ''
+      if(!byProject.has(key)) byProject.set(key,{name:session.project_name??'未分类',sessions:[]})
+      byProject.get(key)!.sessions.push(session)
+    }
+    // Named projects first; 未分类 is a leftover pile, not a peer.
+    return [...byProject.entries()].sort((left,right)=>(left[0]?0:1)-(right[0]?0:1)||right[1].sessions.length-left[1].sessions.length)
+  },[report])
+  return <div className="discovered">
+    <div className="section-heading"><h3 className="section-title">机器上已有的会话</h3><button className="text-button" onClick={scan} disabled={loading}>{loading?'扫描中…':'重新扫描'}</button></div>
+    <p className="muted">从 Codex app-server 和 ~/.claude/projects 读取，按工作目录归到项目下。只读——本应用没有启动它们，无法确认是否还在运行，也不能停止或接管。</p>
+    {error&&<p className="form-error">{error}</p>}
+    {report?.warnings.map(warning=><p key={warning} className="form-error">{warning}</p>)}
+    {loading&&!report&&<p className="muted">正在扫描…</p>}
+    {report&&!report.sessions.length&&!loading&&<p className="muted">没有找到会话。</p>}
+    {/* 未分类 is collapsed only when there are project groups it would bury.
+        When it is all there is, collapsing it would show the user nothing. */}
+    {groups.map(([id,group])=><DiscoveredGroup key={id||'unassigned'} name={group.name} sessions={group.sessions} defaultOpen={!!id||groups.length===1}/>)}
+    {report?.truncated&&<p className="muted">Codex 会话很多，这里只列出最近的部分。</p>}
+  </div>
+}
+
+function DiscoveredGroup({name,sessions,defaultOpen}:{name:string;sessions:DiscoveredSession[];defaultOpen:boolean}) {
+  const [open,setOpen] = useState(defaultOpen)
+  return <div className="task-group">
+    <button className="group-heading" onClick={()=>setOpen(!open)}>{open?<ChevronDown size={15}/>:<ChevronRight size={15}/>}<span>{name}</span><span className="group-count">{sessions.length}</span></button>
+    {open&&<div className="agent-list">{sessions.map(session=><div key={`${session.provider}-${session.session_id}`} className="agent-row discovered-row">
+      <div className={`agent-icon ${session.provider}`}><Bot size={17}/></div>
+      <div className="agent-main">
+        <div className="agent-title"><strong>{session.title||'（无标题）'}</strong><span className="execution">{session.provider==='codex'?'Codex':'Claude Code'}</span></div>
+        <span className="agent-task mono">{session.cwd}</span>
+        <span className="agent-activity">{session.updated_at?new Date(session.updated_at).toLocaleString():'时间未知'}</span>
+      </div>
+      <button className="text-button" title="复制会话 ID" onClick={()=>navigator.clipboard?.writeText(session.session_id)}><Copy size={13}/>ID</button>
+    </div>)}</div>}
+  </div>
+}
 function AgentRow({session,task,project,onChanged}:{session:AgentSession;task?:Task;project?:Project;onChanged:()=>void}) {
   const needsAttention = session.attention !== 'none'
   return <div className={`agent-row ${needsAttention?'needs-attention':''}`}>

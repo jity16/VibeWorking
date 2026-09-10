@@ -229,3 +229,10 @@ pub fn task_detail(state: State<'_, crate::AppState>, task_id: Option<String>, s
 pub fn app_health() -> Result<Value, String> {
     Ok(crate::health::snapshot())
 }
+
+#[tauri::command]
+pub async fn discovered_sessions(
+    state: State<'_, crate::AppState>,
+) -> Result<crate::discovery::DiscoveryReport, String> {
+    crate::discovery::discover(&state.db).await
+}

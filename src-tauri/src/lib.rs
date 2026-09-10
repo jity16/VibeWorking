@@ -1,8 +1,9 @@
 mod agents;
 mod commands;
-mod db;
+pub mod db;
+pub mod discovery;
 mod health;
-mod models;
+pub mod models;
 mod persistence;
 mod proxy;
 mod retry;
@@ -58,7 +59,8 @@ pub fn run() {
             commands::export_data,
             commands::restore_data,
             commands::task_detail,
-            commands::app_health
+            commands::app_health,
+            commands::discovered_sessions
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vibe Working");
