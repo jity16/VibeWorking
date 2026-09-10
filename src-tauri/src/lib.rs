@@ -2,6 +2,7 @@ mod agents;
 mod commands;
 pub mod db;
 pub mod discovery;
+pub mod environment;
 mod health;
 pub mod models;
 mod persistence;
@@ -19,6 +20,9 @@ pub struct AppState {
 }
 
 pub fn run() {
+    // Before anything spawns a process: a Finder-launched bundle starts with a
+    // PATH that contains none of the agents this app drives.
+    environment::install_login_path();
     tracing_subscriber::fmt()
         .with_env_filter("vibe_working=info")
         .with_target(false)

@@ -8,6 +8,15 @@ pub fn snapshot() -> Value {
         "codex": command_version("codex", &["--version"]),
         "claude": command_version("claude", &["--version"]),
         "tmux": command_version("tmux", &["-V"]),
+        // Where each tool was found, and on what PATH: a Finder-launched bundle
+        // starts with a minimal one, and this is how to see whether the login
+        // shell probe recovered it.
+        "resolved": json!({
+            "codex": crate::environment::resolve("codex"),
+            "claude": crate::environment::resolve("claude"),
+            "tmux": crate::environment::resolve("tmux")
+        }),
+        "path": std::env::var("PATH").unwrap_or_default(),
         "terminal_app": cfg!(target_os = "macos"),
         "iTerm2": cfg!(target_os = "macos") && std::path::Path::new("/Applications/iTerm.app").exists()
     })

@@ -1,6 +1,5 @@
 use crate::models::TerminalBinding;
 use sha2::{Digest, Sha256};
-use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::process::Command;
@@ -23,6 +22,12 @@ pub struct TmuxTarget {
     pub pane: String,
 }
 
+/// Every tmux invocation goes through here. Resolving once per call keeps the
+/// binary that gets checked and the binary that gets run the same thing.
+fn tmux_command() -> Result<Command, TerminalError> {
+    Ok(Command::new(crate::environment::resolve("tmux").ok_or(TerminalError::TmuxUnavailable)?))
+}
+
 pub fn safe_session_name(session_id: &str) -> String {
     let compact = session_id
         .chars()
@@ -42,17 +47,11 @@ pub async fn tmux_create_with_env(
     argv: &[String],
     env: &[(&str, &str)],
 ) -> Result<TmuxTarget, TerminalError> {
-    if !Path::new("/opt/homebrew/bin/tmux").exists()
-        && !Path::new("/usr/bin/tmux").exists()
-        && which("tmux").await.is_err()
-    {
-        return Err(TerminalError::TmuxUnavailable);
-    }
     if argv.is_empty() {
         return Err(TerminalError::Command("empty process argv".into()));
     }
     let name = safe_session_name(session_id);
-    let mut command = Command::new("tmux");
+    let mut command = tmux_command()?;
     command.args(["new-session", "-d", "-s", &name, "-c", cwd]);
     for (key, value) in env {
         command.args(["-e", &format!("{key}={value}")]);
@@ -68,26 +67,34 @@ pub async fn tmux_create_with_env(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &name, "set-titles", "on"])
-        .output()
-        .await;
+    if let Ok(mut command) = tmux_command() {
+        let _ = command.args(["set-option", "-t", &name, "set-titles", "on"]).output().await;
+    }
     let title = format!("Vibe Working: {name}");
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &name, "set-titles-string", &title])
-        .output()
-        .await;
+    if let Ok(mut command) = tmux_command() {
+        let _ = command.args(["set-option", "-t", &name, "set-titles-string", &title]).output().await;
+    }
     let pane = format!("{name}:0.0");
     Ok(TmuxTarget { session: name, pane })
 }
 
 pub async fn tmux_exists(target: &TmuxTarget) -> bool {
-    Command::new("tmux")
+    let Ok(mut command) = tmux_command() else { return false };
+    command
         .args(["has-session", "-t", &target.session])
         .output()
         .await
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+pub async fn tmux_kill(target: &TmuxTarget) -> Result<(), TerminalError> {
+    tmux_command()?
+        .args(["kill-session", "-t", &target.session])
+        .output()
+        .await
+        .map_err(|error| TerminalError::Command(error.to_string()))?;
+    Ok(())
 }
 
 // Deliberately absent: send-keys / capture-pane helpers. Typing into a pane
@@ -111,7 +118,7 @@ pub async fn verify_binding(binding: &TerminalBinding) -> Result<bool, TerminalE
 }
 
 pub async fn terminal_identity(target: &TmuxTarget) -> Result<(i64,String), TerminalError> {
-    let output = Command::new("tmux").args(["display-message","-p","-t",&target.pane,"#{pane_pid}|#{session_id}|#{pane_id}|#{pane_start_command}|#{pane_dead}"]).output().await.map_err(|error| TerminalError::Command(error.to_string()))?;
+    let output = tmux_command()?.args(["display-message","-p","-t",&target.pane,"#{pane_pid}|#{session_id}|#{pane_id}|#{pane_start_command}|#{pane_dead}"]).output().await.map_err(|error| TerminalError::Command(error.to_string()))?;
     let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !output.status.success() || identity.ends_with("|1") { return Err(TerminalError::Unverified); }
     let pid = identity.split('|').next().and_then(|value| value.parse::<i64>().ok()).ok_or(TerminalError::Unverified)?;
@@ -185,15 +192,6 @@ end run
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-async fn which(program: &str) -> Result<(), ()> {
-    Command::new("/usr/bin/which")
-        .arg(program)
-        .output()
-        .await
-        .map_err(|_| ())
-        .and_then(|o| if o.status.success() { Ok(()) } else { Err(()) })
 }
 
 #[cfg(test)]

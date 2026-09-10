@@ -119,7 +119,8 @@ fn seconds_to_rfc3339(seconds: i64) -> String {
 async fn discover_codex() -> Result<(Vec<DiscoveredSession>, bool), String> {
     let socket = std::env::temp_dir().join(format!("vibe-working-discovery-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
-    let mut child = Command::new("codex")
+    let codex = crate::environment::resolve("codex").ok_or_else(|| crate::environment::missing_program("codex"))?;
+    let mut child = Command::new(codex)
         .args(["app-server", "--listen", &format!("unix://{}", socket.display())])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

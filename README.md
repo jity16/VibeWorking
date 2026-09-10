@@ -21,6 +21,8 @@ The ignored test starts the installed `codex app-server` on a Unix socket and
 runs the real `initialize` / `thread/start` handshake. It stops before
 `turn/start`, so it never submits anything to a model.
 
+A bundle launched from Finder inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — launchd reads no shell configuration — so the app recovers the login shell's `PATH` at startup before spawning anything. Without that, `codex`, `claude` and `tmux` are all unreachable in the packaged app while everything works under `cargo test` and `pnpm tauri dev`. `app_health` reports the resolved binary paths and the effective `PATH`.
+
 The app stores data under `~/Library/Application Support/Vibe Working/`. API keys are stored in macOS Keychain; exports never include them. The first launch has no seeded or synthetic data.
 
 ## Scope and known limits

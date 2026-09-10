@@ -186,7 +186,9 @@ impl AgentManager {
         let _ = std::fs::remove_file(&socket);
         let listen = format!("unix://{}", socket.display());
         self.db.set_runtime_field(&runtime.session_id, "socket_path", SqlValue::Text(socket.to_string_lossy().to_string()))?;
-        let mut child = Command::new("codex")
+        let codex = crate::environment::resolve("codex")
+            .ok_or_else(|| AgentError::Message(crate::environment::missing_program("codex")))?;
+        let mut child = Command::new(codex)
             .args(["app-server", "--listen", &listen])
             .current_dir(cwd)
             .stdin(Stdio::null())
@@ -299,8 +301,10 @@ impl AgentManager {
         let session_uuid = Uuid::new_v4().to_string();
         // `claude [options] [prompt]`: `--` stops option parsing so a prompt that
         // starts with a dash is still delivered as the prompt.
+        let claude = crate::environment::resolve("claude")
+            .ok_or_else(|| AgentError::Message(crate::environment::missing_program("claude")))?;
         let args = vec![
-            "claude".into(),
+            claude,
             "--session-id".into(),
             session_uuid.clone(),
             "--name".into(),
@@ -422,10 +426,7 @@ impl AgentManager {
             .map_err(|_| "runtime lock poisoned".to_string())?
             .clone();
         if let Some(target) = target {
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &target.session])
-                .output()
-                .await;
+            let _ = terminal::tmux_kill(&target).await;
         }
         let event = ProviderEvent::from_json("stop", json!({ "status": "stopped" }), "user", None);
         self.handle_event(runtime.clone(), event)
@@ -972,21 +973,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 async fn pane_pid(target: &TmuxTarget) -> Result<Option<i64>, AgentError> {
-    let output = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &target.pane,
-            "#{pane_pid}",
-        ])
-        .output()
-        .await
-        .map_err(|e| AgentError::Message(e.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+    Ok(terminal::terminal_identity(target).await.ok().map(|(pid, _)| pid))
 }
 
 fn extract_final_text(payload: &Value) -> Option<String> {
