@@ -1,0 +1,40 @@
+[package]
+name = "vibe-working"
+version = "0.1.0"
+description = "Local-first project and coding-agent session manager"
+authors = ["Vibe Working"]
+edition = "2021"
+
+[lib]
+name = "vibe_working_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4", features = [] }
+
+[dependencies]
+tauri = { version = "2.8", features = [] }
+tauri-plugin-dialog = "2.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "net"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+keyring = { version = "3.6", features = ["apple-native"] }
+thiserror = "2"
+dirs = "6"
+rand = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+base64 = "0.22"
+portable-pty = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

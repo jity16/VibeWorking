@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vibe Working",
+  "version": "0.1.0",
+  "identifier": "dev.vibeworking.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Vibe Working",
+        "width": 1220,
+        "height": 780,
+        "minWidth": 980,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ],
+    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [],
+    "targets": "app",
+    "category": "public.app-category.developer-tools",
+    "shortDescription": "Projects, tasks, prompts and coding-agent sessions",
+    "longDescription": "A local-first workspace for managing real Codex and Claude Code sessions.",
+    "macOS": { "minimumSystemVersion": "13.0" }
+  }
+}
